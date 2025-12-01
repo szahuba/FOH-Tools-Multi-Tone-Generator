@@ -1,0 +1,252 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FOH Tools: Multi-Tone Generator</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    background: #111; color: #eee; font-family: Arial, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  h1 { text-align: center; margin: 10px; font-size: 2em; }
+  #status { text-align: center; margin-bottom: 10px; font-size: 1.2em; }
+  .tone-controls {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 15px; padding: 20px; background: #222; border-radius: 8px;
+    max-width: 95%; margin: auto;
+  }
+  .control-group {
+    width: 100%; display: flex; flex-wrap: wrap;
+    justify-content: center; gap: 10px;
+  }
+  button, select, input[type=range] {
+    padding: 12px; font-size: 1em; border-radius: 6px;
+    border: none; color: #fff; flex: 1 1 auto; min-width: 120px;
+  }
+  #toneStartBtn { background: #28a745; }
+  #toneStopBtn { background: #dc3545; }
+  select { background: #333; color: #fff; border: 1px solid #555; }
+  select[multiple] { height: 120px; }
+  .selected-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .tag { background: #444; padding: 6px 10px; border-radius: 4px; font-size: 0.9em; }
+  canvas {
+    background: #000; display: block; margin: 20px auto;
+    border: 1px solid #444; width: 95%; height: auto;
+  }
+  @media (max-width: 600px) {
+    h1 { font-size: 1.5em; }
+    button, select, input[type=range] { font-size: 0.9em; padding: 10px; }
+    select[multiple] { height: 100px; }
+  }
+</style>
+</head>
+<body>
+<h1>FOH Tools: Multi-Tone Generator</h1>
+<p id="status">Tone Generator Ready</p>
+
+<div class="tone-controls">
+  <div class="control-group">
+    <button id="toneStartBtn">Start Tone/Noise</button>
+    <button id="toneStopBtn">Stop</button>
+  </div>
+
+  <div class="control-group">
+    <label>Level (dBFS): <input type="range" id="toneLevel" min="-40" max="0" step="1" value="-10"></label>
+    <span id="toneLevelDisplay">Level: -10 dBFS</span>
+  </div>
+
+  <div class="control-group">
+    <label>Frequencies (Ctrl+Click for multiple):</label>
+    <select id="toneFreq" multiple>
+      <option value="63">63 Hz</option>
+      <option value="125">125 Hz</option>
+      <option value="250">250 Hz</option>
+      <option value="500">500 Hz</option>
+      <option value="1000" selected>1 kHz</option>
+      <option value="2000">2 kHz</option>
+      <option value="4000">4 kHz</option>
+      <option value="8000">8 kHz</option>
+      <option value="10000">10 kHz</option>
+    </select>
+    <div class="selected-tags" id="selectedTags"></div>
+  </div>
+
+  <div class="control-group">
+    <label>Noise:
+      <select id="toneNoise">
+        <option value="none" selected>None</option>
+        <option value="white">White Noise</option>
+        <option value="pink">Pink Noise</option>
+      </select>
+    </label>
+  </div>
+</div>
+
+<canvas id="visualizer" width="900" height="350"></canvas>
+
+<script>
+let audioCtx, toneGain, oscillators = [], noiseSource = null, analyser, dataArray, bufferLength, animationId;
+
+/* Update selected tags */
+document.getElementById('toneFreq').addEventListener('change', () => {
+  const selectedTags = document.getElementById('selectedTags');
+  selectedTags.innerHTML = '';
+  Array.from(document.getElementById('toneFreq').selectedOptions).forEach(opt => {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = opt.textContent;
+    selectedTags.appendChild(tag);
+  });
+});
+
+/* Start Tone/Noise */
+document.getElementById('toneStartBtn').onclick = () => {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  toneGain = audioCtx.createGain();
+  toneGain.gain.value = Math.pow(10, parseInt(document.getElementById('toneLevel').value) / 20);
+  toneGain.connect(audioCtx.destination);
+
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  bufferLength = analyser.frequencyBinCount;
+  dataArray = new Uint8Array(bufferLength);
+  toneGain.connect(analyser);
+
+  const selectedFreqs = Array.from(document.getElementById('toneFreq').selectedOptions).map(opt => parseInt(opt.value));
+  selectedFreqs.forEach(freq => {
+    const osc = audioCtx.createOscillator();
+    osc.frequency.value = freq;
+    osc.connect(toneGain);
+    osc.start();
+    oscillators.push(osc);
+  });
+
+  const noiseType = document.getElementById('toneNoise').value;
+  if (noiseType !== 'none') {
+    const bufferSize = 2 * audioCtx.sampleRate;
+    const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const output = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) output[i] = Math.random() * 2 - 1;
+    if (noiseType === 'pink') {
+      for (let i = 1; i < bufferSize; i++) output[i] = (output[i-1] + output[i]) / 2;
+    }
+    noiseSource = audioCtx.createBufferSource();
+    noiseSource.buffer = noiseBuffer;
+    noiseSource.loop = true;
+    noiseSource.connect(toneGain);
+    noiseSource.start();
+  }
+
+  document.getElementById('status').textContent = "Tone/Noise Playing...";
+  drawSpectrum(selectedFreqs);
+};
+
+/* Stop Tone/Noise */
+document.getElementById('toneStopBtn').onclick = () => {
+  oscillators.forEach(osc => { osc.stop(); osc.disconnect(); });
+  oscillators = [];
+  if (noiseSource) { noiseSource.stop(); noiseSource.disconnect(); noiseSource = null; }
+  if (toneGain) toneGain.disconnect();
+  cancelAnimationFrame(animationId);
+  clearCanvas();
+  document.getElementById('status').textContent = "Tone/Noise Stopped.";
+
+  // Reset frequency selection and tags
+  const freqSelect = document.getElementById('toneFreq');
+  Array.from(freqSelect.options).forEach(opt => opt.selected = false);
+  document.getElementById('selectedTags').innerHTML = '';
+};
+
+/* Update Level Display */
+document.getElementById('toneLevel').oninput = e => {
+  const level = parseInt(e.target.value);
+  document.getElementById('toneLevelDisplay').textContent = `Level: ${level} dBFS`;
+  if (toneGain) toneGain.gain.value = Math.pow(10, level / 20);
+};
+
+/* Spectrum Visualization with Log Frequency Scale */
+function drawSpectrum(selectedFreqs) {
+  const canvas = document.getElementById('visualizer');
+  const ctx = canvas.getContext('2d');
+  const width = canvas.width;
+  const height = canvas.height;
+
+  function renderFrame() {
+    animationId = requestAnimationFrame(renderFrame);
+    analyser.getByteFrequencyData(dataArray);
+
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, width, height);
+
+    // Grid lines
+    ctx.strokeStyle = '#333';
+    const yTicks = [0, -30, -60];
+    yTicks.forEach(dB => {
+      const yPos = height - 30 - ((dB + 60) * (height - 50) / 60);
+      ctx.beginPath();
+      ctx.moveTo(50, yPos);
+      ctx.lineTo(width - 10, yPos);
+      ctx.stroke();
+    });
+
+    const sampleRate = audioCtx.sampleRate;
+    const nyquist = sampleRate / 2;
+    const freqStep = nyquist / bufferLength;
+
+    // Bars with log scale mapping
+    for (let i = 0; i < bufferLength; i++) {
+      const amplitude = dataArray[i];
+      const dB = 20 * Math.log10(amplitude / 255);
+      const scaledHeight = (dB + 60) * (height - 50) / 60;
+      const freq = i * freqStep;
+      const xPos = 50 + (Math.log10(freq + 1) / Math.log10(nyquist)) * (width - 60);
+      ctx.fillStyle = `rgb(${amplitude+100},50,50)`;
+      ctx.fillRect(xPos, height - scaledHeight - 30, 2, scaledHeight);
+    }
+
+    // Tone markers
+    ctx.strokeStyle = '#0f0';
+    selectedFreqs.forEach(freq => {
+      const xPos = 50 + (Math.log10(freq) / Math.log10(nyquist)) * (width - 60);
+      ctx.beginPath();
+      ctx.moveTo(xPos, 10);
+      ctx.lineTo(xPos, height - 30);
+      ctx.stroke();
+    });
+
+    // Axes and labels
+    ctx.strokeStyle = '#fff';
+    ctx.beginPath();
+    ctx.moveTo(50, 10);
+    ctx.lineTo(50, height - 30);
+    ctx.lineTo(width - 10, height - 30);
+    ctx.stroke();
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px Arial';
+    ctx.fillText('Amplitude (dB)', 5, 15);
+    ctx.fillText('0', 15, 25);
+    ctx.fillText('-30', 15, height / 2);
+    ctx.fillText('-60', 15, height - 35);
+
+    const freqLabels = [63, 125, 250, 500, 1000, 2000, 4000, 8000, 10000];
+    freqLabels.forEach(freq => {
+      const xPos = 50 + (Math.log10(freq) / Math.log10(nyquist)) * (width - 60);
+      ctx.fillText(freq >= 1000 ? freq/1000 + 'k' : freq, xPos - 10, height - 10);
+    });
+    ctx.fillText('Frequency (Hz)', width / 2 - 40, height - 10);
+  }
+  renderFrame();
+}
+
+function clearCanvas() {
+  const canvas = document.getElementById('visualizer');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+</script>
+</body>
+</html>
